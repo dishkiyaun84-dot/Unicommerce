@@ -58,9 +58,11 @@ import os
 import sys
 import time
 
+from requests import Session
 from zeep import Client
 from zeep.exceptions import ValidationError
 from zeep.helpers import serialize_object
+from zeep.transports import Transport
 from zeep.wsse.username import UsernameToken
 
 # --- Configuration --------------------------------------------------------
@@ -124,15 +126,34 @@ def window(days, start=None, end=None):
 
 # --- Connection -------------------------------------------------------------
 
-def get_client():
+def get_client(facility=None):
     """
     Builds an authenticated SOAP client.
 
     PasswordText (use_digest=False) per Unicommerce's documented example
     header. Confirmed working against production -- `describe` connects.
+
+    Uniware scopes facility-bound operations by a `Facility` HTTP header.
+    Without it, GetBulkItemTypeInventory rejects even a facility code that
+    exists and is enabled, with INVALID_FACILITY_CODE. The header is sent
+    whenever a facility is known; it is ignored by operations that do not
+    need it, so this is safe to send generally.
     """
+    session = Session()
+    if facility:
+        session.headers["Facility"] = facility
     token = UsernameToken(USERNAME, API_KEY, use_digest=False)
-    return Client(WSDL_URLS[ENV], wsse=token)
+    return Client(WSDL_URLS[ENV], wsse=token, transport=Transport(session=session))
+
+
+def set_facility_header(client, facility):
+    """Repoints an existing client at another facility, without refetching."""
+    headers = client.transport.session.headers
+    if facility:
+        headers["Facility"] = facility
+    else:
+        headers.pop("Facility", None)
+    return client
 
 
 def _binding_operations(client):
@@ -275,6 +296,7 @@ def try_facilities(client, candidates, sku=None):
     accepted = []
     for code in ordered:
         try:
+            set_facility_header(client, code)
             get_inventory(client, skus=[sku] if sku else None, facilities=[code])
         except RuntimeError as exc:
             detail = str(exc)
@@ -291,10 +313,12 @@ def try_facilities(client, candidates, sku=None):
         print(f"Set DEFAULT_FACILITY to it to make that the default.\n")
     else:
         print(
-            "\nNone accepted. Find the exact code in the Uniware admin UI:\n"
-            "  Settings -> Facilities -> click the facility. The detail page\n"
-            "  shows its Code field, which may differ from the display name.\n"
-            "  The facility switcher in the top bar also shows it.\n"
+            "\nNone accepted. If the code is confirmed correct on the facility's\n"
+            "detail page (Settings -> Facilities -> click through; the Code field\n"
+            "is greyed out and immutable), then the code is not the problem and\n"
+            "this is a permissions issue: the API user must be granted access to\n"
+            "the facility. Check Settings -> Users -> the API user -> facility\n"
+            "access in the Uniware admin UI.\n"
         )
     return accepted
 
@@ -699,6 +723,8 @@ def main():
     p_inv.add_argument("--facility", action="append", dest="facilities")
     p_inv.add_argument("--all", action="store_true",
                        help="whole catalogue (required if no --sku given)")
+    p_inv.add_argument("--no-facility-header", action="store_true",
+                       help="omit the Facility HTTP header, to A/B its effect")
 
     p_so = sub.add_parser("sale-orders", help="order headers only (no line items)")
     p_so.add_argument("--days", type=int, default=1)
@@ -740,8 +766,15 @@ def main():
             "Or resume an existing job with --job JOBCODE.")
 
     require_credentials()
+    facility = None
+    if args.command in ("inventory", "try-facilities"):
+        facility = (getattr(args, "facilities", None) or [DEFAULT_FACILITY])[0]
+        if getattr(args, "no_facility_header", False):
+            facility = None
     print(f"Connecting to Unicommerce ({ENV})...", file=sys.stderr)
-    client = get_client()
+    client = get_client(facility=facility)
+    if facility:
+        print(f"  Facility header: {facility}", file=sys.stderr)
     print("Connected.", file=sys.stderr)
 
     if args.command == "operations":

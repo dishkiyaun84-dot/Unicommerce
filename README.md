@@ -102,19 +102,31 @@ facilities" request. This account has exactly one facility:
 
 That is the `DEFAULT_FACILITY` constant, used whenever `--facility` is not given.
 
-**The UI's displayed code is not necessarily what the API accepts.**
-`styxxinternational` — shown in Settings → Facilities — is rejected with
-`[200001] INVALID_FACILITY_CODE`. Since no operation lists facilities, the code
-has to be found by trial:
+### `INVALID_FACILITY_CODE` for a code that exists
 
-```bash
-python3 unicommerce_connect.py try-facilities CODE1 CODE2 --sku GryDT-PlnOS-XS
+`styxxinternational` is confirmed correct — it is the immutable Code field on the
+facility's detail page, and the facility is enabled. The API rejected it anyway:
+
+```
+[200001] INVALID_FACILITY_CODE: Invalid Facility Codes: [STYXXINTERNATIONAL]
 ```
 
-Each candidate is one read-only call, and lower/upper variants are probed
-automatically. When one is accepted, set `DEFAULT_FACILITY` to it. The exact code
-also appears on the facility's own detail page in the admin UI (click through from
-Settings → Facilities), which is more reliable than the list view's display name.
+So this is not a wrong string. Uniware scopes facility-bound operations by a
+`Facility` HTTP header, and without it the code cannot resolve. The header is now
+sent on every request that knows its facility. To A/B its effect:
+
+```bash
+python3 unicommerce_connect.py inventory --sku GryDT-PlnOS-XS
+python3 unicommerce_connect.py inventory --sku GryDT-PlnOS-XS --no-facility-header
+```
+
+**If the header does not fix it, the remaining cause is permissions**, not code:
+the API user must be granted access to the facility. Check Settings → Users → the
+API user → facility access in the Uniware admin UI. Nothing in this script can
+work around that.
+
+`try-facilities CODE...` remains for probing candidates if a second facility is
+ever added, and now sets the header per candidate too.
 
 
 ```bash
