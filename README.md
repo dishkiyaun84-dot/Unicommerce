@@ -56,12 +56,12 @@ without `--all`; both date-ranged commands refuse a window over 7 days without
 
 ```bash
 python3 unicommerce_connect.py describe
-python3 unicommerce_connect.py inventory --sku ABC123
+python3 unicommerce_connect.py inventory --sku ABC123   # a real SKU
 python3 unicommerce_connect.py sale-orders --days 1
-python3 unicommerce_connect.py export --job-type "<name>" --days 1
+python3 unicommerce_connect.py export --job-type "Sale Order Item" --days 1
 
 python3 unicommerce_connect.py inventory --all
-python3 unicommerce_connect.py export --job-type "<name>" --days 90 --full
+python3 unicommerce_connect.py export --job-type "Sale Order Item" --days 90 --full
 ```
 
 Large SKU lists are chunked 100 per call; sale orders page through
@@ -73,7 +73,9 @@ Everything else is reconciled. These two are plain `xsd:string` in the schema an
 their vocabularies live in the Uniware config, so they only resolve at runtime:
 
 **`ExportJobTypeName`** — required, passed as `--job-type`. Take the exact name
-from the export screen in the Uniware admin UI. The script refuses to invent one.
+from the export screen in the Uniware admin UI; `"Sale Order Item"` above is an
+illustrative example, not a confirmed value. Keep it quoted, since these names
+contain spaces. The script refuses to invent one.
 
 **The `ExportFilter` `id`** for the date range — `--date-filter-id`, defaulting to
 `created`, which is a guess.
