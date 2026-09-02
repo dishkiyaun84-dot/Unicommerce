@@ -87,9 +87,15 @@ GetBulkItemTypeInventory -- request structure
     FacilityCode [1..n] REQUIRED : string
 ```
 
-Run this before adding any new operation. If a call still fails validation,
-`call` reports the missing element and what was sent as one line rather than a
-zeep traceback.
+Run this before adding any new operation. Every call is also preflighted against
+the same local schema: zeep raises on the *first* missing element, so a request
+short of three required fields costs three round trips to find out. The preflight
+names them all at once, before anything is sent:
+
+```
+GetInventorySnapshot is missing 2 REQUIRED element(s): ItemTypes, UpdatedSinceInMinutes
+  Sent: []
+```
 
 ### Facilities must be enumerated
 
@@ -136,6 +142,12 @@ python3 unicommerce_connect.py inventory --sku GryDT-PlnOS-XS --snapshot
 
 It emits the same row shape, so downstream code does not care which path produced
 it, and `OpenPurchase` is not read.
+
+`UpdatedSinceInMinutes` is required and acts as a lookback window — a SKU whose
+inventory has not changed within it is omitted. The default is ten years, i.e.
+everything, because the restock pipeline wants current stock for every SKU rather
+than recently-touched ones. Narrow it with `--updated-since-minutes` for
+incremental pulls.
 
 **The trade-off:** snapshot totals are not broken down by facility. With one
 facility that is exactly equivalent; the day a second is added, these rows become

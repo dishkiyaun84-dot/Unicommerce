@@ -96,6 +96,10 @@ IGNORED_RESPONSE_FIELDS = ("OpenPurchase", "OpenPurchaseQuantity", "PendingPO")
 # Override with --facility if a second facility is ever added.
 DEFAULT_FACILITY = "styxxinternational"
 
+# UpdatedSinceInMinutes is a REQUIRED lookback window on GetInventorySnapshot;
+# SKUs untouched within it are omitted. Ten years, i.e. "everything".
+SNAPSHOT_LOOKBACK_MINUTES = 10 * 365 * 24 * 60
+
 NARROW_MAX_DAYS = 7
 SKU_CHUNK_SIZE = 100
 PAGE_SIZE = 100
@@ -336,6 +340,26 @@ def find_operations(client, keyword):
     return matches
 
 
+def missing_required(client, op_name, fields):
+    """
+    Names every top-level REQUIRED element the request omits.
+
+    zeep raises on the FIRST missing element, so a request short of three
+    required fields costs three round trips to discover. This reads the
+    same local WSDL and reports them all at once.
+    """
+    try:
+        operation = _binding_operations(client).get(op_name)
+    except AttributeError:
+        return []          # client without a parsed WSDL: skip the preflight
+    if operation is None:
+        return []
+    body = getattr(operation.input, "body", None)
+    elements = getattr(getattr(body, "type", None), "elements", None) or []
+    return [name for name, element in elements
+            if (element.min_occurs or 0) >= 1 and fields.get(name) is None]
+
+
 def call(client, op_name, **fields):
     """
     Invokes a WSDL operation by name, dropping unset (None) fields.
@@ -346,6 +370,14 @@ def call(client, op_name, **fields):
     may not be. The fix is normally to send the wrapper with an empty inner
     list rather than omitting it -- see get_inventory.
     """
+    absent = missing_required(client, op_name, fields)
+    if absent:
+        raise RuntimeError(
+            f"{op_name} is missing {len(absent)} REQUIRED element(s): "
+            f"{', '.join(absent)}\n"
+            f"  Sent: {sorted(k for k, v in fields.items() if v is not None)}\n"
+            f"  `schema` shows the full requirement tree for every operation."
+        )
     operation = getattr(client.service, op_name)
     try:
         return operation(**{k: v for k, v in fields.items() if v is not None})
@@ -486,7 +518,8 @@ def get_inventory_rows(client, skus=None, facilities=None, chunk=SKU_CHUNK_SIZE)
     return rows
 
 
-def get_inventory_snapshot(client, skus=None, updated_since_minutes=None,
+def get_inventory_snapshot(client, skus=None,
+                           updated_since_minutes=SNAPSHOT_LOOKBACK_MINUTES,
                            **overrides):
     """
     Per-SKU inventory via GetInventorySnapshot -- the no-facility fallback.
@@ -501,6 +534,13 @@ def get_inventory_snapshot(client, skus=None, updated_since_minutes=None,
 
     This operation takes NO facility code, so it works even where
     GetBulkItemTypeInventory is refused with INVALID_FACILITY_CODE.
+
+    UpdatedSinceInMinutes is REQUIRED, so it is always sent. It is a
+    lookback window: a SKU whose inventory has not changed within it is
+    omitted from the response. The default is deliberately wide (see
+    SNAPSHOT_LOOKBACK_MINUTES) because the restock pipeline wants current
+    stock for every SKU, not just recently-touched ones. If a SKU you
+    expect is missing, widen it with --updated-since-minutes.
 
     The trade-off: totals are not broken down by facility. That is exactly
     equivalent while the account has ONE facility, and silently wrong the
@@ -537,7 +577,8 @@ def flatten_snapshot(response, facility=None):
     return rows
 
 
-def get_snapshot_rows(client, skus=None, facility=None, chunk=SKU_CHUNK_SIZE):
+def get_snapshot_rows(client, skus=None, facility=None, chunk=SKU_CHUNK_SIZE,
+                      updated_since_minutes=SNAPSHOT_LOOKBACK_MINUTES):
     """
     Fetches snapshot inventory, chunking large SKU lists.
 
@@ -548,15 +589,17 @@ def get_snapshot_rows(client, skus=None, facility=None, chunk=SKU_CHUNK_SIZE):
     """
     skus = list(skus or [])
     if not skus:
-        return flatten_snapshot(get_inventory_snapshot(client), facility)
+        return flatten_snapshot(get_inventory_snapshot(
+            client, updated_since_minutes=updated_since_minutes), facility)
 
     rows = []
     for i in range(0, len(skus), chunk):
         batch = skus[i:i + chunk]
         print(f"  snapshot: SKUs {i + 1}-{i + len(batch)} of {len(skus)}",
               file=sys.stderr)
-        rows.extend(flatten_snapshot(get_inventory_snapshot(client, skus=batch),
-                                     facility))
+        rows.extend(flatten_snapshot(get_inventory_snapshot(
+            client, skus=batch, updated_since_minutes=updated_since_minutes),
+            facility))
     return rows
 
 
@@ -799,6 +842,10 @@ def main():
                        help="whole catalogue (required if no --sku given)")
     p_inv.add_argument("--no-facility-header", action="store_true",
                        help="omit the Facility HTTP header, to A/B its effect")
+    p_inv.add_argument("--updated-since-minutes", type=int,
+                       default=SNAPSHOT_LOOKBACK_MINUTES,
+                       help="snapshot lookback window; SKUs untouched within "
+                            "it are omitted")
     p_inv.add_argument("--snapshot", action="store_true",
                        help="use GetInventorySnapshot, which needs no facility "
                             "code; totals are not broken down by facility")
@@ -871,8 +918,9 @@ def main():
         if args.snapshot:
             print("  GetInventorySnapshot: totals are NOT per-facility; "
                   f"labelling rows {facilities[0]}", file=sys.stderr)
-            rows = get_snapshot_rows(client, skus=args.skus,
-                                     facility=facilities[0])
+            rows = get_snapshot_rows(
+                client, skus=args.skus, facility=facilities[0],
+                updated_since_minutes=args.updated_since_minutes)
         else:
             print(f"  facility: {', '.join(facilities)}", file=sys.stderr)
             rows = get_inventory_rows(client, skus=args.skus,
