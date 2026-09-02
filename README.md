@@ -67,6 +67,23 @@ python3 unicommerce_connect.py export --job-type "Sale Order Item" --days 90 --f
 Large SKU lists are chunked 100 per call; sale orders page through
 `SearchOptions {DisplayStart, DisplayLength}` against `TotalRecords`.
 
+### Required elements are invisible in `describe`
+
+`signature()` does not print `minOccurs`, so an element that looks optional in
+the `describe` output may be mandatory. `GetBulkItemTypeInventory` rejects a
+request omitting `FacilityCodes` — and would equally reject one omitting
+`SkuCodes`, which is the catalogue-wide case. Both wrappers are therefore always
+sent, with an empty inner list meaning "no filter on this dimension":
+
+```xml
+<SkuCodes><SkuCode>GryDT-PlnOS-XS</SkuCode></SkuCodes>
+<FacilityCodes/>
+```
+
+If another operation fails the same way, `call` reports it as one line naming the
+missing element and what was sent, rather than a zeep traceback. The fix is
+normally to send the wrapper empty rather than omit it.
+
 ## The two values the WSDL cannot give you
 
 Everything else is reconciled. These two are plain `xsd:string` in the schema and
@@ -124,7 +141,8 @@ Verified offline:
 - Request serialization for `GetBulkItemTypeInventory`, `SearchSaleOrder` and
   `CreateExportJob` against XSDs rebuilt from the confirmed signatures — the
   generated SOAP bodies are schema-valid, including the nested `SkuCodes`,
-  `SearchOptions` and `ExportFilters/DateRange` wrappers.
+  `SearchOptions` and `ExportFilters/DateRange` wrappers, and with `SkuCodes`
+  and `FacilityCodes` marked required as the live service reported them.
 - `flatten_inventory` producing per-SKU-per-facility rows, and dropping
   `OpenPurchase` even when injected at either nesting level.
 - SKU chunking (250 SKUs → 3 calls of 100/100/50) and order pagination

@@ -59,6 +59,7 @@ import sys
 import time
 
 from zeep import Client
+from zeep.exceptions import ValidationError
 from zeep.helpers import serialize_object
 from zeep.wsse.username import UsernameToken
 
@@ -169,9 +170,26 @@ def describe_operations(client, names=None):
 
 
 def call(client, op_name, **fields):
-    """Invokes a WSDL operation by name, dropping unset (None) fields."""
+    """
+    Invokes a WSDL operation by name, dropping unset (None) fields.
+
+    Turns zeep's schema ValidationError into one actionable line. These are
+    almost always a REQUIRED element we did not send: signature() does not
+    print minOccurs, so an element that looks optional in `describe` output
+    may not be. The fix is normally to send the wrapper with an empty inner
+    list rather than omitting it -- see get_inventory.
+    """
     operation = getattr(client.service, op_name)
-    return operation(**{k: v for k, v in fields.items() if v is not None})
+    try:
+        return operation(**{k: v for k, v in fields.items() if v is not None})
+    except ValidationError as exc:
+        raise RuntimeError(
+            f"{op_name} failed schema validation: {exc}\n"
+            f"  Sent: {sorted(k for k, v in fields.items() if v is not None)}\n"
+            f"  A 'Missing element X' here means X is required even though "
+            f"`describe` shows no minOccurs. Send X as an empty wrapper "
+            f"(e.g. {{'Item': []}}) rather than omitting it."
+        ) from exc
 
 
 # --- Shared response handling ----------------------------------------------
@@ -225,14 +243,30 @@ def get_inventory(client, skus=None, facilities=None, **overrides):
                 Facilities: {FacilityInventory: {FacilityCode, FacilityName,
                 Inventory: xsd:int}[]}}[]}
 
-    Omitting SkuCodes asks for the whole catalogue.
+    BOTH wrappers are REQUIRED elements -- confirmed the hard way, by a
+    ValidationError from the live service when FacilityCodes was omitted.
+    `describe` does not show minOccurs, so this is not visible in the
+    signature. They are always sent; an empty inner list (rendering as
+    <SkuCodes/>) means "no filter on this dimension", so an empty SkuCodes
+    asks for the whole catalogue.
     """
     fields = {
-        "SkuCodes": {"SkuCode": list(skus)} if skus else None,
-        "FacilityCodes": {"FacilityCode": list(facilities)} if facilities else None,
+        "SkuCodes": {"SkuCode": list(skus) if skus else []},
+        "FacilityCodes": {"FacilityCode": list(facilities) if facilities else []},
     }
     fields.update(overrides)
-    response = call(client, OPS["inventory"], **fields)
+    try:
+        response = call(client, OPS["inventory"], **fields)
+    except RuntimeError as exc:
+        if "FacilityCode" in str(exc) and not facilities:
+            raise RuntimeError(
+                f"{exc}\n"
+                f"  If the service requires at least one facility rather than "
+                f"accepting an empty list, pass one with --facility CODE. To "
+                f"find the codes, run `operations` and look for a "
+                f"facility-listing operation."
+            ) from exc
+        raise
     return check_response(response, "GetBulkItemTypeInventory")
 
 
