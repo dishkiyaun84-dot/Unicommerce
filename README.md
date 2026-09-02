@@ -100,7 +100,22 @@ facilities" request. This account has exactly one facility:
 | --- | --- |
 | `styxxinternational` | WAREHOUSE |
 
-That is the `DEFAULT_FACILITY` constant, used whenever `--facility` is not given:
+That is the `DEFAULT_FACILITY` constant, used whenever `--facility` is not given.
+
+**The UI's displayed code is not necessarily what the API accepts.**
+`styxxinternational` — shown in Settings → Facilities — is rejected with
+`[200001] INVALID_FACILITY_CODE`. Since no operation lists facilities, the code
+has to be found by trial:
+
+```bash
+python3 unicommerce_connect.py try-facilities CODE1 CODE2 --sku GryDT-PlnOS-XS
+```
+
+Each candidate is one read-only call, and lower/upper variants are probed
+automatically. When one is accepted, set `DEFAULT_FACILITY` to it. The exact code
+also appears on the facility's own detail page in the admin UI (click through from
+Settings → Facilities), which is more reliable than the list view's display name.
+
 
 ```bash
 python3 unicommerce_connect.py inventory --sku GryDT-PlnOS-XS

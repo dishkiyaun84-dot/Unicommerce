@@ -256,6 +256,49 @@ def find_facilities(client):
     return []
 
 
+def try_facilities(client, candidates, sku=None):
+    """
+    Probes candidate facility codes and reports which the service accepts.
+
+    The UI's displayed code is not necessarily the one the API wants, and
+    there is no listing operation, so the code has to be found by trial.
+    Each probe is a single read-only inventory call.
+    """
+    seen, ordered = set(), []
+    for candidate in candidates:
+        for variant in (candidate, candidate.lower(), candidate.upper()):
+            if variant not in seen:
+                seen.add(variant)
+                ordered.append(variant)
+
+    print(f"\nProbing {len(ordered)} candidate facility code(s):\n")
+    accepted = []
+    for code in ordered:
+        try:
+            get_inventory(client, skus=[sku] if sku else None, facilities=[code])
+        except RuntimeError as exc:
+            detail = str(exc)
+            if "INVALID_FACILITY_CODE" in detail:
+                print(f"  {code:<30} invalid")
+            else:
+                print(f"  {code:<30} {detail.splitlines()[0]}")
+            continue
+        print(f"  {code:<30} ACCEPTED")
+        accepted.append(code)
+
+    if accepted:
+        print(f"\nUse: --facility {accepted[0]}")
+        print(f"Set DEFAULT_FACILITY to it to make that the default.\n")
+    else:
+        print(
+            "\nNone accepted. Find the exact code in the Uniware admin UI:\n"
+            "  Settings -> Facilities -> click the facility. The detail page\n"
+            "  shows its Code field, which may differ from the display name.\n"
+            "  The facility switcher in the top bar also shows it.\n"
+        )
+    return accepted
+
+
 def find_operations(client, keyword):
     """Lists operations whose name contains a keyword, with signatures."""
     matches = sorted(o for o in _binding_operations(client)
@@ -294,15 +337,30 @@ def call(client, op_name, **fields):
 
 # --- Shared response handling ----------------------------------------------
 
+def _error_text(entry):
+    """
+    Renders one Error/Warning entry.
+
+    Uniware returns these with LOWERCASE field names (code, message,
+    description), so checking only the capitalised forms falls through to
+    str(entry) and dumps the raw object.
+    """
+    code = getattr(entry, "code", None) or getattr(entry, "Code", None)
+    message = (getattr(entry, "message", None) or getattr(entry, "Message", None))
+    description = (getattr(entry, "description", None)
+                   or getattr(entry, "Description", None))
+    parts = [p for p in (message, description) if p]
+    if not parts:
+        return str(entry)
+    text = ": ".join(str(p) for p in parts)
+    return f"[{code}] {text}" if code else text
+
+
 def collect_messages(response, container, item):
     """Flattens a Uniware {Errors: {Error: [...]}} wrapper into strings."""
     block = getattr(response, container, None)
     entries = getattr(block, item, None) if block is not None else None
-    messages = []
-    for entry in entries or []:
-        text = getattr(entry, "Message", None) or getattr(entry, "Description", None)
-        messages.append(str(text or entry))
-    return messages
+    return [_error_text(entry) for entry in entries or []]
 
 
 def check_response(response, what):
@@ -630,6 +688,10 @@ def main():
     p_find.add_argument("keyword")
     sub.add_parser("find-facilities",
                    help="locate the operation that lists facility codes")
+    p_try = sub.add_parser("try-facilities",
+                           help="probe candidate facility codes for a valid one")
+    p_try.add_argument("codes", nargs="+")
+    p_try.add_argument("--sku", help="SKU to probe with")
 
     p_inv = sub.add_parser("inventory", help="inventory per SKU per facility")
     p_inv.add_argument("--sku", action="append", dest="skus",
@@ -692,6 +754,8 @@ def main():
         find_operations(client, args.keyword)
     elif args.command == "find-facilities":
         find_facilities(client)
+    elif args.command == "try-facilities":
+        try_facilities(client, args.codes, sku=args.sku)
     elif args.command == "inventory":
         facilities = args.facilities or [DEFAULT_FACILITY]
         print(f"  facility: {', '.join(facilities)}", file=sys.stderr)
