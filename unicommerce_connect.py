@@ -78,8 +78,8 @@ WSDL_URLS = {
 
 OPS = {
     "inventory": "GetBulkItemTypeInventory",
-    # Listed so `describe` still prints it, but deliberately unused: no
-    # facility dimension, and it carries OpenPurchase.
+    # Fallback path: no facility dimension, so it sidesteps the facility
+    # authorisation that blocks the bulk operation. See get_snapshot_rows.
     "inventory_snapshot": "GetInventorySnapshot",
     "sale_orders": "SearchSaleOrder",
     "export_create": "CreateExportJob",
@@ -486,6 +486,80 @@ def get_inventory_rows(client, skus=None, facilities=None, chunk=SKU_CHUNK_SIZE)
     return rows
 
 
+def get_inventory_snapshot(client, skus=None, updated_since_minutes=None,
+                           **overrides):
+    """
+    Per-SKU inventory via GetInventorySnapshot -- the no-facility fallback.
+
+    Signature CONFIRMED:
+      REQUEST : ItemTypes: {ItemType: {ItemSKU: xsd:string}[]},
+                UpdatedSinceInMinutes: xsd:integer
+      RESPONSE: ..., InventorySnapshots: {InventorySnapshot: {ItemSKU,
+                PendingInventoryAssessment, Inventory, OpenSale, OpenPurchase,
+                InventoryBlocked, PutawayPending, PendingStockTransfer,
+                VendorInventory}[]}
+
+    This operation takes NO facility code, so it works even where
+    GetBulkItemTypeInventory is refused with INVALID_FACILITY_CODE.
+
+    The trade-off: totals are not broken down by facility. That is exactly
+    equivalent while the account has ONE facility, and silently wrong the
+    day a second is added -- see get_snapshot_rows.
+    """
+    fields = {
+        "ItemTypes": {"ItemType": [{"ItemSKU": sku} for sku in (skus or [])]},
+        "UpdatedSinceInMinutes": updated_since_minutes,
+    }
+    fields.update(overrides)
+    response = call(client, OPS["inventory_snapshot"], **fields)
+    return check_response(response, "GetInventorySnapshot")
+
+
+def flatten_snapshot(response, facility=None):
+    """
+    Flattens snapshot rows into the same shape flatten_inventory produces.
+
+    OpenPurchase and PendingInventoryAssessment are deliberately not read --
+    the former is PO-derived and unreliable on this account.
+    """
+    rows = []
+    for entry in _listed(response, "InventorySnapshots", "InventorySnapshot"):
+        rows.append({
+            "sku": getattr(entry, "ItemSKU", None),
+            "name": None,
+            "mrp": None,
+            "facility_code": facility,
+            "facility_name": None,
+            "inventory": getattr(entry, "Inventory", None),
+            "open_sale": getattr(entry, "OpenSale", None),
+            "blocked": getattr(entry, "InventoryBlocked", None),
+        })
+    return rows
+
+
+def get_snapshot_rows(client, skus=None, facility=None, chunk=SKU_CHUNK_SIZE):
+    """
+    Fetches snapshot inventory, chunking large SKU lists.
+
+    `facility` only labels the rows so they match the bulk path's shape; it
+    is NOT sent to the service and does NOT filter anything. Attributing
+    these totals to one facility is only honest while the account has a
+    single facility.
+    """
+    skus = list(skus or [])
+    if not skus:
+        return flatten_snapshot(get_inventory_snapshot(client), facility)
+
+    rows = []
+    for i in range(0, len(skus), chunk):
+        batch = skus[i:i + chunk]
+        print(f"  snapshot: SKUs {i + 1}-{i + len(batch)} of {len(skus)}",
+              file=sys.stderr)
+        rows.extend(flatten_snapshot(get_inventory_snapshot(client, skus=batch),
+                                     facility))
+    return rows
+
+
 # --- Pull 2a: sale order headers (validation probe) -------------------------
 
 def search_sale_orders(client, days=1, start=None, end=None, status=None,
@@ -725,6 +799,9 @@ def main():
                        help="whole catalogue (required if no --sku given)")
     p_inv.add_argument("--no-facility-header", action="store_true",
                        help="omit the Facility HTTP header, to A/B its effect")
+    p_inv.add_argument("--snapshot", action="store_true",
+                       help="use GetInventorySnapshot, which needs no facility "
+                            "code; totals are not broken down by facility")
 
     p_so = sub.add_parser("sale-orders", help="order headers only (no line items)")
     p_so.add_argument("--days", type=int, default=1)
@@ -791,8 +868,15 @@ def main():
         try_facilities(client, args.codes, sku=args.sku)
     elif args.command == "inventory":
         facilities = args.facilities or [DEFAULT_FACILITY]
-        print(f"  facility: {', '.join(facilities)}", file=sys.stderr)
-        rows = get_inventory_rows(client, skus=args.skus, facilities=facilities)
+        if args.snapshot:
+            print("  GetInventorySnapshot: totals are NOT per-facility; "
+                  f"labelling rows {facilities[0]}", file=sys.stderr)
+            rows = get_snapshot_rows(client, skus=args.skus,
+                                     facility=facilities[0])
+        else:
+            print(f"  facility: {', '.join(facilities)}", file=sys.stderr)
+            rows = get_inventory_rows(client, skus=args.skus,
+                                      facilities=facilities)
         print(f"{len(rows)} SKU/facility rows", file=sys.stderr)
         for row in rows:
             print(row)

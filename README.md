@@ -120,10 +120,28 @@ python3 unicommerce_connect.py inventory --sku GryDT-PlnOS-XS
 python3 unicommerce_connect.py inventory --sku GryDT-PlnOS-XS --no-facility-header
 ```
 
-**If the header does not fix it, the remaining cause is permissions**, not code:
-the API user must be granted access to the facility. Check Settings → Users → the
-API user → facility access in the Uniware admin UI. Nothing in this script can
-work around that.
+The header did **not** fix it — the error is unchanged with `Facility:
+styxxinternational` sent. So the remaining cause is authorisation, not code: the
+API user must be granted access to the facility. Check Settings → Users → the API
+user → facility access in the Uniware admin UI.
+
+### Working around it: `--snapshot`
+
+`GetInventorySnapshot` takes **no facility code**, so it is unaffected by whatever
+blocks the bulk operation:
+
+```bash
+python3 unicommerce_connect.py inventory --sku GryDT-PlnOS-XS --snapshot
+```
+
+It emits the same row shape, so downstream code does not care which path produced
+it, and `OpenPurchase` is not read.
+
+**The trade-off:** snapshot totals are not broken down by facility. With one
+facility that is exactly equivalent; the day a second is added, these rows become
+silently wrong and the bulk path (or a per-facility rework) is required. The rows
+are labelled with `DEFAULT_FACILITY` for shape compatibility only — that label is
+an assumption, not something the service returned.
 
 `try-facilities CODE...` remains for probing candidates if a second facility is
 ever added, and now sets the header per candidate too.
