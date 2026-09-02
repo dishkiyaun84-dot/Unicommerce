@@ -56,33 +56,59 @@ without `--all`; both date-ranged commands refuse a window over 7 days without
 
 ```bash
 python3 unicommerce_connect.py describe
-python3 unicommerce_connect.py inventory --sku ABC123   # a real SKU
+python3 unicommerce_connect.py schema
+python3 unicommerce_connect.py inventory --sku ABC123 --facility MUM
 python3 unicommerce_connect.py sale-orders --days 1
 python3 unicommerce_connect.py export --job-type "Sale Order Item" --days 1
 
-python3 unicommerce_connect.py inventory --all
+python3 unicommerce_connect.py inventory --all --facility MUM
 python3 unicommerce_connect.py export --job-type "Sale Order Item" --days 90 --full
 ```
 
 Large SKU lists are chunked 100 per call; sale orders page through
 `SearchOptions {DisplayStart, DisplayLength}` against `TotalRecords`.
 
-### Required elements are invisible in `describe`
+### `describe` cannot show what is required — use `schema`
 
 `signature()` does not print `minOccurs`, so an element that looks optional in
-the `describe` output may be mandatory. `GetBulkItemTypeInventory` rejects a
-request omitting `FacilityCodes` — and would equally reject one omitting
-`SkuCodes`, which is the catalogue-wide case. Both wrappers are therefore always
-sent, with an empty inner list meaning "no filter on this dimension":
+`describe` output may be mandatory, and a wrapper that looks like it accepts an
+empty list may require at least one entry. Each of those costs a failed
+round-trip to discover. The constraints are in the WSDL already:
 
-```xml
-<SkuCodes><SkuCode>GryDT-PlnOS-XS</SkuCode></SkuCodes>
-<FacilityCodes/>
+```bash
+python3 unicommerce_connect.py schema
 ```
 
-If another operation fails the same way, `call` reports it as one line naming the
-missing element and what was sent, rather than a zeep traceback. The fix is
-normally to send the wrapper empty rather than omit it.
+```
+GetBulkItemTypeInventory -- request structure
+  SkuCodes [1..1] REQUIRED : SkuCodes
+    SkuCode [0..n] optional : string
+  FacilityCodes [1..1] REQUIRED : FacilityCodes
+    FacilityCode [1..n] REQUIRED : string
+```
+
+Run this before adding any new operation. If a call still fails validation,
+`call` reports the missing element and what was sent as one line rather than a
+zeep traceback.
+
+### Facilities must be enumerated
+
+`FacilityCodes` requires at least one `FacilityCode`, so there is no "all
+facilities" request — `--facility` is mandatory:
+
+```bash
+python3 unicommerce_connect.py inventory --sku GryDT-PlnOS-XS --facility MUM
+```
+
+To find the codes:
+
+```bash
+python3 unicommerce_connect.py find-facilities      # or: find-operations KEYWORD
+```
+
+Whether `--all` (catalogue-wide, empty `SkuCodes`) is possible depends on
+`SkuCode`'s own `minOccurs` — `schema` output answers that. If it is also `[1..n]`,
+SKUs have to be enumerated too and `--all` cannot work as written.
 
 ## The two values the WSDL cannot give you
 

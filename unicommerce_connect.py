@@ -169,6 +169,62 @@ def describe_operations(client, names=None):
     print()
 
 
+def _occurs(element):
+    maximum = element.max_occurs
+    maximum = "n" if maximum in ("unbounded", None) or maximum == float("inf") else maximum
+    return f"[{element.min_occurs}..{maximum}]"
+
+
+def dump_element(name, element, depth=0, max_depth=4):
+    """Prints one request element with its minOccurs/maxOccurs, recursively."""
+    required = "REQUIRED" if (element.min_occurs or 0) >= 1 else "optional"
+    type_name = getattr(element.type, "name", None) or type(element.type).__name__
+    print(f"{'  ' * (depth + 1)}{name} {_occurs(element)} {required} : {type_name}")
+    if depth < max_depth:
+        for sub_name, sub_element in getattr(element.type, "elements", None) or []:
+            dump_element(sub_name, sub_element, depth + 1, max_depth)
+
+
+def show_schema(client, names=None):
+    """
+    Prints the REQUIRED/optional structure of each request.
+
+    `describe` renders signature(), which does NOT show minOccurs -- so an
+    element that looks optional there may be mandatory, and a wrapper that
+    accepts an empty list may in fact require at least one entry. Both cost
+    a failed round-trip to discover. This reads the same WSDL locally and
+    prints the constraints outright.
+    """
+    operations = _binding_operations(client)
+    for name in names or list(OPS.values()):
+        print(f"\n{'=' * 70}\n{name} -- request structure\n{'=' * 70}")
+        operation = operations.get(name)
+        if operation is None:
+            print("  !! NOT FOUND on this WSDL.")
+            continue
+        body = getattr(operation.input, "body", None)
+        elements = getattr(getattr(body, "type", None), "elements", None)
+        if not elements:
+            print("  <no structured request body>")
+            continue
+        for element_name, element in elements:
+            dump_element(element_name, element)
+    print()
+
+
+def find_operations(client, keyword):
+    """Lists operations whose name contains a keyword, with signatures."""
+    matches = sorted(o for o in _binding_operations(client)
+                     if keyword.lower() in o.lower())
+    if not matches:
+        print(f"No operation name contains '{keyword}'. Run `operations` for the "
+              f"full list.")
+        return matches
+    print(f"\nOperations matching '{keyword}':\n")
+    describe_operations(client, matches)
+    return matches
+
+
 def call(client, op_name, **fields):
     """
     Invokes a WSDL operation by name, dropping unset (None) fields.
@@ -243,30 +299,29 @@ def get_inventory(client, skus=None, facilities=None, **overrides):
                 Facilities: {FacilityInventory: {FacilityCode, FacilityName,
                 Inventory: xsd:int}[]}}[]}
 
-    BOTH wrappers are REQUIRED elements -- confirmed the hard way, by a
-    ValidationError from the live service when FacilityCodes was omitted.
-    `describe` does not show minOccurs, so this is not visible in the
-    signature. They are always sent; an empty inner list (rendering as
-    <SkuCodes/>) means "no filter on this dimension", so an empty SkuCodes
-    asks for the whole catalogue.
+    Both wrappers are REQUIRED, and FacilityCodes requires AT LEAST ONE
+    FacilityCode -- an empty <FacilityCodes/> is rejected:
+
+      Expected at least 1 items (minOccurs check) 0 items found.
+      (GetBulkItemTypeInventoryRequest.FacilityCodes.FacilityCode)
+
+    So there is no "all facilities" request; facilities must be enumerated.
+    Run `schema` to see these constraints for every operation, and
+    `find-facilities` to locate the operation that lists the codes.
     """
+    if not facilities:
+        raise ValueError(
+            "GetBulkItemTypeInventory requires at least one facility code -- "
+            "an empty FacilityCodes is rejected by the schema. Pass --facility "
+            "CODE, or run `find-facilities` to locate the operation that lists "
+            "them."
+        )
     fields = {
         "SkuCodes": {"SkuCode": list(skus) if skus else []},
-        "FacilityCodes": {"FacilityCode": list(facilities) if facilities else []},
+        "FacilityCodes": {"FacilityCode": list(facilities)},
     }
     fields.update(overrides)
-    try:
-        response = call(client, OPS["inventory"], **fields)
-    except RuntimeError as exc:
-        if "FacilityCode" in str(exc) and not facilities:
-            raise RuntimeError(
-                f"{exc}\n"
-                f"  If the service requires at least one facility rather than "
-                f"accepting an empty list, pass one with --facility CODE. To "
-                f"find the codes, run `operations` and look for a "
-                f"facility-listing operation."
-            ) from exc
-        raise
+    response = call(client, OPS["inventory"], **fields)
     return check_response(response, "GetBulkItemTypeInventory")
 
 
@@ -292,7 +347,11 @@ def flatten_inventory(response):
 
 
 def get_inventory_rows(client, skus=None, facilities=None, chunk=SKU_CHUNK_SIZE):
-    """Fetches inventory, chunking large SKU lists into several calls."""
+    """
+    Fetches inventory, chunking large SKU lists into several calls.
+
+    `facilities` is mandatory -- see get_inventory.
+    """
     if not skus:
         return flatten_inventory(get_inventory(client, facilities=facilities))
 
@@ -519,6 +578,13 @@ def main():
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("operations", help="list every operation on the WSDL")
     sub.add_parser("describe", help="request signatures for the ops we call")
+    sub.add_parser("schema", help="which request elements are REQUIRED "
+                                  "(minOccurs, which describe cannot show)")
+    p_find = sub.add_parser("find-operations",
+                            help="search operation names for a keyword")
+    p_find.add_argument("keyword")
+    sub.add_parser("find-facilities",
+                   help="locate the operation that lists facility codes")
 
     p_inv = sub.add_parser("inventory", help="inventory per SKU per facility")
     p_inv.add_argument("--sku", action="append", dest="skus",
@@ -549,8 +615,16 @@ def main():
         sys.exit(
             "Refusing a full-catalogue pull by default.\n"
             "Test a narrow slice first, e.g.:\n"
-            "  python3 unicommerce_connect.py inventory --sku ABC123\n"
+            "  python3 unicommerce_connect.py inventory --sku ABC123 --facility CODE\n"
             "Then re-run with --all once the output looks right.")
+    if args.command == "inventory" and not args.facilities:
+        sys.exit(
+            "--facility is required.\n"
+            "GetBulkItemTypeInventory rejects an empty FacilityCodes list "
+            "(minOccurs=1),\n"
+            "so there is no 'all facilities' request -- they must be enumerated.\n"
+            "To find your facility codes:\n"
+            "  python3 unicommerce_connect.py find-facilities")
     if args.command in ("sale-orders", "export"):
         guard_window(args.days, args.full, args.command)
     if args.command == "export" and not args.job and not args.job_type:
@@ -570,6 +644,13 @@ def main():
         list_operations(client)
     elif args.command == "describe":
         describe_operations(client)
+    elif args.command == "schema":
+        show_schema(client)
+    elif args.command == "find-operations":
+        find_operations(client, args.keyword)
+    elif args.command == "find-facilities":
+        if not find_operations(client, "facilit"):
+            find_operations(client, "warehouse")
     elif args.command == "inventory":
         rows = get_inventory_rows(client, skus=args.skus,
                                   facilities=args.facilities)
