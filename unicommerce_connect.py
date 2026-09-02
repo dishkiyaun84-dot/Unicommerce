@@ -60,7 +60,7 @@ import time
 
 from requests import Session
 from zeep import Client
-from zeep.exceptions import ValidationError
+from zeep.exceptions import Fault, ValidationError
 from zeep.helpers import serialize_object
 from zeep.transports import Transport
 from zeep.wsse.username import UsernameToken
@@ -325,6 +325,97 @@ def try_facilities(client, candidates, sku=None):
             "access in the Uniware admin UI.\n"
         )
     return accepted
+
+
+# Candidate ways of establishing facility context. The HTTP header "Facility"
+# is confirmed NOT to work: the service still answers "Illegal Access, facility
+# is required" with it set.
+FACILITY_HEADERS = ("Facility", "facility", "X-Facility", "FacilityCode",
+                    "uniware-facility", "UNIWARE-FACILITY")
+
+
+def _service_address(client):
+    return client.service._binding_options["address"]
+
+
+def _set_address(client, address):
+    client.service._binding_options["address"] = address
+
+
+def diagnose_facility(client, code, sku=None):
+    """
+    Probes how this tenant expects facility context to be supplied.
+
+    Two failures point at the same cause: GetBulkItemTypeInventory rejects a
+    valid facility code with INVALID_FACILITY_CODE, and GetInventorySnapshot
+    -- which sends no facility at all -- faults with "Illegal Access,
+    facility is required". Neither is a wrong code; the session simply has
+    no facility context.
+
+    Each attempt is one read-only GetInventorySnapshot. Any result other
+    than "facility is required" means that mechanism established context.
+    """
+    base_address = _service_address(client)
+    skus = [sku] if sku else []
+    attempts = [("(baseline: no facility context)", None, base_address)]
+    attempts += [(f"HTTP header {name}: {code}", name, base_address)
+                 for name in FACILITY_HEADERS]
+    separator = "&" if "?" in base_address else "?"
+    attempts += [
+        (f"URL ?facility={code}", None, f"{base_address}{separator}facility={code}"),
+        (f"URL ?facilityCode={code}", None,
+         f"{base_address}{separator}facilityCode={code}"),
+    ]
+
+    print(f"\nService address: {base_address}")
+    print(f"Probing {len(attempts)} way(s) of supplying facility '{code}':\n")
+
+    promising = []
+    for label, header, address in attempts:
+        session_headers = client.transport.session.headers
+        for name in FACILITY_HEADERS:
+            session_headers.pop(name, None)
+        if header:
+            session_headers[header] = code
+        _set_address(client, address)
+
+        try:
+            get_inventory_snapshot(client, skus=skus)
+        except Fault as exc:
+            detail = str(exc)
+            marker = "  " if "facility is required" in detail.lower() else ">>"
+            print(f"  {marker} {label:<42} Fault: {detail}")
+            if marker == ">>":
+                promising.append(label)
+            continue
+        except Exception as exc:                       # noqa: BLE001
+            print(f"  >> {label:<42} {type(exc).__name__}: "
+                  f"{str(exc).splitlines()[0]}")
+            promising.append(label)
+            continue
+        print(f"  >> {label:<42} SUCCEEDED")
+        promising.append(label)
+
+    _set_address(client, base_address)
+    print()
+    if promising:
+        print("Mechanisms that changed the outcome (>>):")
+        for label in promising:
+            print(f"  {label}")
+        print("\nThe first of these is the one to wire in permanently.\n")
+    else:
+        print(
+            "Every mechanism returned 'facility is required', including the\n"
+            "baseline. Facility context is not something this script can\n"
+            "supply, so the cause is account configuration: the API user has\n"
+            "no facility associated with it. Fix it in the Uniware admin UI --\n"
+            "Settings -> Users -> the API user -> assign the facility -- or ask\n"
+            "Unicommerce support, quoting both errors:\n"
+            "  GetInventorySnapshot  -> Fault: Illegal Access, facility is required\n"
+            "  GetBulkItemTypeInventory -> [200001] INVALID_FACILITY_CODE for\n"
+            "     styxxinternational, which is the facility's real, enabled code.\n"
+        )
+    return promising
 
 
 def find_operations(client, keyword):
@@ -833,6 +924,10 @@ def main():
                            help="probe candidate facility codes for a valid one")
     p_try.add_argument("codes", nargs="+")
     p_try.add_argument("--sku", help="SKU to probe with")
+    p_diag = sub.add_parser("diagnose-facility",
+                            help="probe how facility context must be supplied")
+    p_diag.add_argument("--code", default=DEFAULT_FACILITY)
+    p_diag.add_argument("--sku")
 
     p_inv = sub.add_parser("inventory", help="inventory per SKU per facility")
     p_inv.add_argument("--sku", action="append", dest="skus",
@@ -913,6 +1008,8 @@ def main():
         find_facilities(client)
     elif args.command == "try-facilities":
         try_facilities(client, args.codes, sku=args.sku)
+    elif args.command == "diagnose-facility":
+        diagnose_facility(client, args.code, sku=args.sku)
     elif args.command == "inventory":
         facilities = args.facilities or [DEFAULT_FACILITY]
         if args.snapshot:

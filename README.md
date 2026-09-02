@@ -126,10 +126,34 @@ python3 unicommerce_connect.py inventory --sku GryDT-PlnOS-XS
 python3 unicommerce_connect.py inventory --sku GryDT-PlnOS-XS --no-facility-header
 ```
 
-The header did **not** fix it — the error is unchanged with `Facility:
-styxxinternational` sent. So the remaining cause is authorisation, not code: the
-API user must be granted access to the facility. Check Settings → Users → the API
-user → facility access in the Uniware admin UI.
+The header did **not** fix it, and `--snapshot` then failed differently:
+
+```
+GetBulkItemTypeInventory -> [200001] INVALID_FACILITY_CODE: [STYXXINTERNATIONAL]
+GetInventorySnapshot     -> Fault: Illegal Access, facility is required
+```
+
+`GetInventorySnapshot` sends no facility at all, so the second error is the
+informative one: the server wants facility **context** for the session, from
+outside the request body, and the `Facility` HTTP header is not how it gets it.
+Read together, both errors say the same thing — the session has no facility
+context, so no facility code can resolve.
+
+To find the mechanism without one guess per round trip:
+
+```bash
+python3 unicommerce_connect.py diagnose-facility --sku GryDT-PlnOS-XS
+```
+
+It probes a baseline plus six HTTP header spellings and two URL query
+parameters, one read-only call each, and flags with `>>` anything that does not
+answer "facility is required".
+
+**If nothing is flagged, no code change can fix this.** The cause is account
+configuration — the API user has no facility associated with it. Fix it at
+Settings → Users → the API user → assign the facility, or raise it with
+Unicommerce support quoting both errors above, noting that `styxxinternational`
+is the facility's real, enabled, immutable code.
 
 ### Working around it: `--snapshot`
 
