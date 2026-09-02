@@ -52,8 +52,8 @@ python3 unicommerce_connect.py export --days 90 --full  # 6. only once 4 looks r
 | Inventory, catalogue-wide | `GetBulkItemTypeInventory` | name confirmed |
 | Inventory, per SKU | `GetInventorySnapshot` | name confirmed |
 | Sale order headers | `SearchSaleOrder` | name confirmed; **no line items** |
-| Start bulk export | `CreateExportJob` | **existence unconfirmed** |
-| Poll bulk export | `GetExportJobStatus` | **existence unconfirmed** |
+| Start bulk export | `CreateExportJob` | name confirmed; request fields unconfirmed |
+| Poll bulk export | `GetExportJobStatus` | **fully confirmed and wired up** |
 
 Which inventory operation gives cleaner per-SKU-per-facility numbers is still
 open — both stay reachable so they can be compared on the same narrow slice
@@ -61,16 +61,37 @@ open — both stay reachable so they can be compared on the same narrow slice
 are given.
 
 `SearchSaleOrder` returns order headers only, which is why the size-wise sales
-figure needs the export path. If `describe` reports the two export operations
-missing, bulk line-item export is unavailable on this tenant and that figure
-needs another route.
+figure needs the export path. That path exists — `GetExportJobStatus` is
+confirmed against the WSDL as:
+
+```
+REQUEST : JobCode: xsd:string
+RESPONSE: Successful: xsd:boolean, Errors: {Error: ns0:Error[]},
+          Warnings: {Warning: ns0:Warning[]}, Status: xsd:string,
+          FilePath: xsd:string
+```
+
+`FilePath` on the finished job is where the line items land. `Successful` is the
+API-call wrapper rather than the job outcome, so a `False` there raises with the
+`Errors` text instead of polling on blindly.
+
+The `Status` **values** are still unknown — the WSDL types it as a plain
+`xsd:string`, so the real vocabulary only appears at runtime. Unrecognised
+values keep polling and end in a timeout rather than being read as success.
+
+Long exports can be resumed instead of restarted:
+
+```bash
+python3 unicommerce_connect.py export --job JOB-77
+```
 
 ## Next step: confirm the request fields
 
-Operation **names** for inventory and `SearchSaleOrder` are confirmed. Every
-request **field** name is not — they are marked `# UNVERIFIED` in the source and
-grouped one dict per function, so each is a single edit. So are the export job's
-id field and its terminal status values.
+`GetExportJobStatus` is fully reconciled. Still outstanding: the request fields
+for `GetBulkItemTypeInventory`, `GetInventorySnapshot`, `SearchSaleOrder` and
+`CreateExportJob`, plus the job-id field on the `CreateExportJob` response and
+the real `Status` values. These are marked `# UNVERIFIED` in the source and
+grouped one dict per function, so each is a single edit.
 
 ```bash
 python3 unicommerce_connect.py describe
@@ -100,5 +121,9 @@ signatures, whether the export operations exist, and every live response — is
 Tested offline: CLI dispatch, credential and env guards, the narrow-slice
 guards, operation routing for both inventory ops, request construction, the
 trailing-window date maths, `describe` against a locally built WSDL, and the
-export state machine (create → poll → complete, failure states, missing job id,
-and unrecognised or absent statuses timing out rather than reporting success).
+export state machine against the confirmed response shape (create → poll →
+complete with FilePath, `Successful=False` and FAILED both raising with their
+Errors text, warnings deduplicated across polls, a completed job with no
+FilePath called out, `--job` resuming without creating a second export, missing
+job id, and unrecognised or absent statuses timing out rather than reporting
+success).

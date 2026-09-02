@@ -32,11 +32,12 @@ USAGE -- narrow slices are the default; full runs need an explicit flag:
   python3 unicommerce_connect.py export --days 90 --full     # full window
 
 RUN `describe` FIRST.
-  Operation NAMES for inventory and SearchSaleOrder are confirmed against the
-  real v1.9 WSDL. CreateExportJob/GetExportJobStatus are NOT yet confirmed to
-  exist on this tenant -- `describe` reports whether they do. Request FIELD
-  names throughout are marked `# UNVERIFIED` and grouped one dict per
-  function, so reconciling each against `describe` output is a single edit.
+  GetExportJobStatus is CONFIRMED to exist, and its request field (JobCode)
+  and response shape (Successful/Errors/Warnings/Status/FilePath) are wired
+  up. Its Status VALUES are still unknown -- the WSDL types Status as a plain
+  xsd:string. Every other request FIELD name is still marked `# UNVERIFIED`
+  and grouped one dict per function, so reconciling each against `describe`
+  output is a single edit.
 
 Endpoints (from the account's API panel):
   Sandbox:    WSDL https://staging.unicommerce.com/services/soap/uniware15.wsdl
@@ -69,11 +70,10 @@ OPS = {
     "inventory_bulk": "GetBulkItemTypeInventory",
     "inventory_snapshot": "GetInventorySnapshot",
     "sale_orders": "SearchSaleOrder",
-    # NOT yet confirmed on this tenant -- `describe` reports whether they exist.
     # SearchSaleOrder returns order headers without line items, so the
     # size-wise figure needs this export path instead.
-    "export_create": "CreateExportJob",
-    "export_status": "GetExportJobStatus",
+    "export_create": "CreateExportJob",          # request signature unconfirmed
+    "export_status": "GetExportJobStatus",       # CONFIRMED, fully wired up
 }
 
 # Present in some responses but meaningless on this account: POs are not
@@ -258,6 +258,7 @@ def create_export_job(client, days=1, start=None, end=None, **overrides):
 
 def extract_job_id(response):
     """Pulls the job id out of a CreateExportJob response."""
+    # JobCode is what GetExportJobStatus takes (confirmed), so it leads.
     for field in ("JobCode", "JobId", "ExportJobCode", "Code"):  # UNVERIFIED
         value = getattr(response, field, None)
         if value:
@@ -269,10 +270,33 @@ def extract_job_id(response):
 
 
 def get_export_job_status(client, job_id, **overrides):
-    """Polls one export job."""
-    fields = {"JobCode": job_id}      # UNVERIFIED -- must match create's id field
+    """
+    Polls one export job.
+
+    Signature CONFIRMED against the v1.9 WSDL:
+      REQUEST : JobCode: xsd:string
+      RESPONSE: Successful: xsd:boolean, Errors: {Error: ns0:Error[]},
+                Warnings: {Warning: ns0:Warning[]}, Status: xsd:string,
+                FilePath: xsd:string
+    """
+    fields = {"JobCode": job_id}
     fields.update(overrides)
     return call(client, OPS["export_status"], **fields)
+
+
+def collect_messages(response, container, item):
+    """
+    Flattens a Uniware {Errors: {Error: [...]}} wrapper into a list of strings.
+
+    Confirmed present on GetExportJobStatus responses.
+    """
+    block = getattr(response, container, None)
+    entries = getattr(block, item, None) if block is not None else None
+    messages = []
+    for entry in entries or []:
+        text = getattr(entry, "Message", None) or getattr(entry, "Description", None)
+        messages.append(str(text or entry))
+    return messages
 
 
 def wait_for_export(client, job_id, timeout=EXPORT_TIMEOUT_SECONDS,
@@ -280,22 +304,46 @@ def wait_for_export(client, job_id, timeout=EXPORT_TIMEOUT_SECONDS,
     """
     Polls until the export job finishes, fails, or the timeout expires.
 
-    Terminal-state names are UNVERIFIED; anything unrecognised keeps polling
-    rather than being treated as success, so a schema mismatch surfaces as a
-    timeout instead of a silently empty result.
+    Returns the finished status response, whose FilePath field points at the
+    exported file. `Successful` is the API-call wrapper, not the job outcome:
+    a False there means the poll call itself failed, so it raises with
+    whatever Errors came back rather than continuing to poll blindly.
+
+    The Status VALUES are still unverified -- the WSDL types it as a plain
+    xsd:string, so the real vocabulary only shows up at runtime. Anything
+    unrecognised keeps polling rather than being treated as success, so a
+    mismatch surfaces as a timeout instead of a silently empty result.
     """
-    done = {"COMPLETE", "COMPLETED", "SUCCESS", "SUCCESSFUL"}   # UNVERIFIED
-    failed = {"FAILED", "ERROR", "CANCELLED"}                   # UNVERIFIED
+    done = {"COMPLETE", "COMPLETED", "SUCCESS", "SUCCESSFUL"}   # UNVERIFIED values
+    failed = {"FAILED", "ERROR", "CANCELLED"}                   # UNVERIFIED values
     deadline = time.monotonic() + timeout
+    seen = set()
 
     while time.monotonic() < deadline:
         response = get_export_job_status(client, job_id)
+
+        if getattr(response, "Successful", None) is False:
+            errors = collect_messages(response, "Errors", "Error")
+            raise RuntimeError(
+                f"GetExportJobStatus({job_id}) returned Successful=False: "
+                + ("; ".join(errors) if errors else "no Errors given")
+            )
+
+        for warning in collect_messages(response, "Warnings", "Warning"):
+            if warning not in seen:
+                seen.add(warning)
+                print(f"  warning: {warning}", file=sys.stderr)
+
         status = str(getattr(response, "Status", "") or "").upper()
         print(f"  export {job_id}: {status or '<no Status field>'}", file=sys.stderr)
         if status in done:
             return response
         if status in failed:
-            raise RuntimeError(f"Export job {job_id} ended in state {status}")
+            errors = collect_messages(response, "Errors", "Error")
+            raise RuntimeError(
+                f"Export job {job_id} ended in state {status}"
+                + (f": {'; '.join(errors)}" if errors else "")
+            )
         time.sleep(interval)
 
     raise TimeoutError(
@@ -304,12 +352,28 @@ def wait_for_export(client, job_id, timeout=EXPORT_TIMEOUT_SECONDS,
     )
 
 
-def export_sale_orders(client, days=1, start=None, end=None, **overrides):
-    """Full export flow: create the job, poll it, return the finished status."""
-    created = create_export_job(client, days=days, start=start, end=end, **overrides)
-    job_id = extract_job_id(created)
-    print(f"  export job created: {job_id}", file=sys.stderr)
-    return wait_for_export(client, job_id)
+def export_sale_orders(client, days=1, start=None, end=None, job_id=None,
+                       **overrides):
+    """
+    Full export flow: create the job, poll it, report the file path.
+
+    Pass job_id to resume polling an export that was already started, rather
+    than creating a second one -- useful for a long 90-day run.
+    """
+    if job_id is None:
+        created = create_export_job(client, days=days, start=start, end=end,
+                                    **overrides)
+        job_id = extract_job_id(created)
+        print(f"  export job created: {job_id}", file=sys.stderr)
+
+    finished = wait_for_export(client, job_id)
+    file_path = getattr(finished, "FilePath", None)
+    if file_path:
+        print(f"  export file: {file_path}", file=sys.stderr)
+    else:
+        print("  !! job finished with no FilePath -- nothing to read",
+              file=sys.stderr)
+    return finished
 
 
 # --- Scope guards -----------------------------------------------------------
@@ -351,6 +415,8 @@ def main():
     p_ex = sub.add_parser("export", help="bulk sale-order export, with line items")
     p_ex.add_argument("--days", type=int, default=1)
     p_ex.add_argument("--full", action="store_true")
+    p_ex.add_argument("--job", help="resume polling an existing job instead of "
+                                    "creating a new one")
 
     args = parser.parse_args()
 
@@ -380,7 +446,7 @@ def main():
     elif args.command == "sale-orders":
         print(get_sale_orders(client, days=args.days))
     elif args.command == "export":
-        print(export_sale_orders(client, days=args.days))
+        print(export_sale_orders(client, days=args.days, job_id=args.job))
 
 
 if __name__ == "__main__":
