@@ -88,6 +88,12 @@ OPS = {
 # account. Never read these -- open-PO quantities come from the manual file.
 IGNORED_RESPONSE_FIELDS = ("OpenPurchase", "OpenPurchaseQuantity", "PendingPO")
 
+# The account's only facility, type WAREHOUSE, read from the Uniware admin UI
+# (Settings -> Facilities). The WSDL exposes no way to list facilities, and
+# GetBulkItemTypeInventory requires at least one, so this is the default.
+# Override with --facility if a second facility is ever added.
+DEFAULT_FACILITY = "styxxinternational"
+
 NARROW_MAX_DAYS = 7
 SKU_CHUNK_SIZE = 100
 PAGE_SIZE = 100
@@ -344,19 +350,13 @@ def get_inventory(client, skus=None, facilities=None, **overrides):
       (GetBulkItemTypeInventoryRequest.FacilityCodes.FacilityCode)
 
     So there is no "all facilities" request; facilities must be enumerated.
-    Run `schema` to see these constraints for every operation, and
-    `find-facilities` to locate the operation that lists the codes.
+    There is no operation to list facilities, so the code comes from the
+    Uniware admin UI; DEFAULT_FACILITY holds this account's only one.
     """
-    if not facilities:
-        raise ValueError(
-            "GetBulkItemTypeInventory requires at least one facility code -- "
-            "an empty FacilityCodes is rejected by the schema. Pass --facility "
-            "CODE, or run `find-facilities` to locate the operation that lists "
-            "them."
-        )
+    facilities = list(facilities) if facilities else [DEFAULT_FACILITY]
     fields = {
         "SkuCodes": {"SkuCode": list(skus) if skus else []},
-        "FacilityCodes": {"FacilityCode": list(facilities)},
+        "FacilityCodes": {"FacilityCode": facilities},
     }
     fields.update(overrides)
     response = call(client, OPS["inventory"], **fields)
@@ -388,7 +388,7 @@ def get_inventory_rows(client, skus=None, facilities=None, chunk=SKU_CHUNK_SIZE)
     """
     Fetches inventory, chunking large SKU lists into several calls.
 
-    `facilities` is mandatory -- see get_inventory.
+    Defaults to DEFAULT_FACILITY when none is given -- see get_inventory.
     """
     if not skus:
         return flatten_inventory(get_inventory(client, facilities=facilities))
@@ -664,16 +664,9 @@ def main():
         sys.exit(
             "Refusing a full-catalogue pull by default.\n"
             "Test a narrow slice first, e.g.:\n"
-            "  python3 unicommerce_connect.py inventory --sku ABC123 --facility CODE\n"
+            "  python3 unicommerce_connect.py inventory --sku ABC123\n"
             "Then re-run with --all once the output looks right.")
-    if args.command == "inventory" and not args.facilities:
-        sys.exit(
-            "--facility is required.\n"
-            "GetBulkItemTypeInventory rejects an empty FacilityCodes list "
-            "(minOccurs=1),\n"
-            "so there is no 'all facilities' request -- they must be enumerated.\n"
-            "To find your facility codes:\n"
-            "  python3 unicommerce_connect.py find-facilities")
+
     if args.command in ("sale-orders", "export"):
         guard_window(args.days, args.full, args.command)
     if args.command == "export" and not args.job and not args.job_type:
@@ -700,8 +693,9 @@ def main():
     elif args.command == "find-facilities":
         find_facilities(client)
     elif args.command == "inventory":
-        rows = get_inventory_rows(client, skus=args.skus,
-                                  facilities=args.facilities)
+        facilities = args.facilities or [DEFAULT_FACILITY]
+        print(f"  facility: {', '.join(facilities)}", file=sys.stderr)
+        rows = get_inventory_rows(client, skus=args.skus, facilities=facilities)
         print(f"{len(rows)} SKU/facility rows", file=sys.stderr)
         for row in rows:
             print(row)

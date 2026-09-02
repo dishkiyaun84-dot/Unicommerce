@@ -57,11 +57,11 @@ without `--all`; both date-ranged commands refuse a window over 7 days without
 ```bash
 python3 unicommerce_connect.py describe
 python3 unicommerce_connect.py schema
-python3 unicommerce_connect.py inventory --sku ABC123 --facility MUM
+python3 unicommerce_connect.py inventory --sku ABC123
 python3 unicommerce_connect.py sale-orders --days 1
 python3 unicommerce_connect.py export --job-type "Sale Order Item" --days 1
 
-python3 unicommerce_connect.py inventory --all --facility MUM
+python3 unicommerce_connect.py inventory --all
 python3 unicommerce_connect.py export --job-type "Sale Order Item" --days 90 --full
 ```
 
@@ -94,19 +94,25 @@ zeep traceback.
 ### Facilities must be enumerated
 
 `FacilityCodes` requires at least one `FacilityCode`, so there is no "all
-facilities" request — `--facility` is mandatory:
+facilities" request. This account has exactly one facility:
+
+| Code | Type |
+| --- | --- |
+| `styxxinternational` | WAREHOUSE |
+
+That is the `DEFAULT_FACILITY` constant, used whenever `--facility` is not given:
 
 ```bash
-python3 unicommerce_connect.py inventory --sku GryDT-PlnOS-XS --facility MUM
+python3 unicommerce_connect.py inventory --sku GryDT-PlnOS-XS
+python3 unicommerce_connect.py inventory --sku GryDT-PlnOS-XS --facility OTHER
 ```
 
 **The codes are not available through the API.** This tenant's WSDL has no
 facility-listing operation — the facility operations are all writes
 (`CreateFacility`, `EditFacility`, `CreateOrEditFacilityItemType`) plus
-`SwitchSaleOrderItemFacility`. `find-facilities` confirms this and says so.
-
-Take the code from the Uniware admin UI: the facility selector in the top bar,
-or Settings → Facilities. It is the short code, not the display name.
+`SwitchSaleOrderItemFacility`, which `find-facilities` reports. The code above
+was read from the Uniware admin UI (Settings → Facilities). If a second facility
+is ever added, find it there and pass it with `--facility`.
 
 Whether `--all` (catalogue-wide, empty `SkuCodes`) is possible depends on
 `SkuCode`'s own `minOccurs` — `schema` output answers that. If it is also `[1..n]`,
