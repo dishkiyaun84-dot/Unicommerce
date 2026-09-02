@@ -100,11 +100,13 @@ facilities" request — `--facility` is mandatory:
 python3 unicommerce_connect.py inventory --sku GryDT-PlnOS-XS --facility MUM
 ```
 
-To find the codes:
+**The codes are not available through the API.** This tenant's WSDL has no
+facility-listing operation — the facility operations are all writes
+(`CreateFacility`, `EditFacility`, `CreateOrEditFacilityItemType`) plus
+`SwitchSaleOrderItemFacility`. `find-facilities` confirms this and says so.
 
-```bash
-python3 unicommerce_connect.py find-facilities      # or: find-operations KEYWORD
-```
+Take the code from the Uniware admin UI: the facility selector in the top bar,
+or Settings → Facilities. It is the short code, not the display name.
 
 Whether `--all` (catalogue-wide, empty `SkuCodes`) is possible depends on
 `SkuCode`'s own `minOccurs` — `schema` output answers that. If it is also `[1..n]`,
@@ -122,6 +124,9 @@ contain spaces. The script refuses to invent one.
 
 **The `ExportFilter` `id`** for the date range — `--date-filter-id`, defaulting to
 `created`, which is a guess.
+
+**`Frequency`** — `schema` reports it `[1..1] REQUIRED`, so it is always sent.
+`ONCE` is a guess; override with `--frequency` if the service rejects it.
 
 A wrong filter id is the dangerous case: the filter may be **ignored rather than
 rejected**, and the export then silently covers the entire order history instead

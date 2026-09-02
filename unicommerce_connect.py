@@ -212,6 +212,44 @@ def show_schema(client, names=None):
     print()
 
 
+FACILITY_KEYWORDS = ("facilit", "warehouse", "location")
+READ_PREFIXES = ("get", "search", "list", "fetch")
+
+
+def find_facilities(client):
+    """
+    Looks for an operation that LISTS facility codes.
+
+    On this tenant there is none: the facility operations are all writes
+    (CreateFacility, EditFacility, CreateOrEditFacilityItemType) plus
+    SwitchSaleOrderItemFacility. Codes therefore have to come from the
+    Uniware admin UI rather than the API.
+    """
+    operations = _binding_operations(client)
+    matches = sorted({op for keyword in FACILITY_KEYWORDS
+                      for op in operations if keyword in op.lower()})
+    readers = [op for op in matches
+               if op.lower().startswith(READ_PREFIXES)]
+
+    if readers:
+        print("\nOperations that may list facilities:\n")
+        describe_operations(client, readers)
+        return readers
+
+    print("\nNo facility-LISTING operation on this WSDL.")
+    if matches:
+        print("Facility-related operations are all writes or transfers:")
+        for op in matches:
+            print(f"  {op}")
+    print(
+        "\nGet the facility code from the Uniware admin UI instead -- the\n"
+        "facility selector in the top bar, or Settings -> Facilities. It is\n"
+        "the short code, not the display name. Then:\n"
+        "  python3 unicommerce_connect.py inventory --sku SKU --facility CODE\n"
+    )
+    return []
+
+
 def find_operations(client, keyword):
     """Lists operations whose name contains a keyword, with signatures."""
     matches = sorted(o for o in _binding_operations(client)
@@ -419,7 +457,7 @@ def search_sale_orders(client, days=1, start=None, end=None, status=None,
 
 def create_export_job(client, job_type, days=1, start=None, end=None,
                       date_filter_id="created", columns=None, email=None,
-                      **overrides):
+                      frequency="ONCE", **overrides):
     """
     Starts an async bulk export.
 
@@ -432,11 +470,16 @@ def create_export_job(client, job_type, days=1, start=None, end=None,
                 ScheduleTime, NotificationEmail, Frequency
       RESPONSE: ..., JobCode: xsd:string
 
-    ScheduleTime/Frequency are left unset so the job runs once, immediately.
+    `schema` reports Frequency as [1..1] REQUIRED, so it is always sent --
+    leaving it unset fails validation before the request goes out.
+    ScheduleTime stays unset so the job runs immediately.
 
-    Two values here are NOT in the WSDL and cannot be derived from it:
-    `job_type` (required, from the Uniware export screen) and
-    `date_filter_id` (which filter the date range applies to).
+    THREE values here are not derivable from the WSDL, all plain strings
+    whose vocabularies live in the Uniware config:
+      job_type       -- required, from the Uniware export screen
+      date_filter_id -- which filter the date range applies to
+      frequency      -- "ONCE" is a guess; override with --frequency if the
+                        service rejects it
     """
     start, end = window(days, start, end)
     fields = {
@@ -447,6 +490,7 @@ def create_export_job(client, job_type, days=1, start=None, end=None,
             "DateRange": {"Start": start, "End": end},
         }]},
         "NotificationEmail": email,
+        "Frequency": frequency,
     }
     fields.update(overrides)
     response = call(client, OPS["export_create"], **fields)
@@ -512,7 +556,7 @@ def wait_for_export(client, job_id, timeout=EXPORT_TIMEOUT_SECONDS,
 
 def export_sale_orders(client, job_type=None, days=1, start=None, end=None,
                        job_id=None, date_filter_id="created", email=None,
-                       **overrides):
+                       frequency="ONCE", columns=None, **overrides):
     """
     Full export flow: create the job, poll it, report the file path.
 
@@ -524,7 +568,8 @@ def export_sale_orders(client, job_type=None, days=1, start=None, end=None,
             raise ValueError("job_type is required to create an export job")
         created = create_export_job(client, job_type, days=days, start=start,
                                     end=end, date_filter_id=date_filter_id,
-                                    email=email, **overrides)
+                                    email=email, frequency=frequency,
+                                    columns=columns, **overrides)
         job_id = getattr(created, "JobCode", None)
         if not job_id:
             raise RuntimeError(
@@ -606,6 +651,10 @@ def main():
                       help="ExportFilter id the date range applies to")
     p_ex.add_argument("--job", help="resume polling an existing job")
     p_ex.add_argument("--email", help="NotificationEmail for the finished job")
+    p_ex.add_argument("--frequency", default="ONCE",
+                      help="Frequency is a REQUIRED field; ONCE is a guess")
+    p_ex.add_argument("--column", action="append", dest="columns",
+                      help="repeatable ExportColumn; omit for the default set")
     p_ex.add_argument("--skip-validation", action="store_true",
                       help="skip the SearchSaleOrder order-count cross-check")
 
@@ -649,8 +698,7 @@ def main():
     elif args.command == "find-operations":
         find_operations(client, args.keyword)
     elif args.command == "find-facilities":
-        if not find_operations(client, "facilit"):
-            find_operations(client, "warehouse")
+        find_facilities(client)
     elif args.command == "inventory":
         rows = get_inventory_rows(client, skus=args.skus,
                                   facilities=args.facilities)
@@ -667,7 +715,8 @@ def main():
             validate_export_slice(client, args.days)
         print(export_sale_orders(client, job_type=args.job_type, days=args.days,
                                  job_id=args.job, email=args.email,
-                                 date_filter_id=args.date_filter_id))
+                                 date_filter_id=args.date_filter_id,
+                                 frequency=args.frequency, columns=args.columns))
 
 
 if __name__ == "__main__":
