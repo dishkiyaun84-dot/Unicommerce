@@ -247,6 +247,26 @@ The export's `Status` **values** remain unknown (`xsd:string` in the schema).
 Unrecognised values keep polling and end in a timeout rather than being read as
 success. Long exports resume with `--job JOB-77` instead of restarting.
 
+### The tenant's responses do not match its own WSDL
+
+`SaleOrder` declares `NotificationMobile` before `NotificationEmail` in an
+`xsd:sequence`, but the server omits `NotificationMobile` entirely for orders
+without a mobile number. Strict parsing rejects the entire response:
+
+```
+XMLParseError: Unexpected element '...}NotificationEmail',
+expected '...}NotificationMobile'
+```
+
+That is a decode failure on a **successful** call — the order data is there. The
+client therefore runs with `strict=False`, which is required, not a convenience.
+Absent elements come back as `None` and nothing the script reads is dropped.
+`xml_huge_tree` is also set, since a 90-day window or full-catalogue pull can
+exceed lxml's default node limits.
+
+Expect more of these: where one element is missing from a declared sequence,
+others may be too.
+
 ## Testing status
 
 Not yet run against the live service from this repo's development environment —

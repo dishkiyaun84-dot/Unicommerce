@@ -59,7 +59,7 @@ import sys
 import time
 
 from requests import Session
-from zeep import Client
+from zeep import Client, Settings
 from zeep.exceptions import Fault, ValidationError
 from zeep.helpers import serialize_object
 from zeep.transports import Transport
@@ -137,17 +137,36 @@ def get_client(facility=None):
     PasswordText (use_digest=False) per Unicommerce's documented example
     header. Confirmed working against production -- `describe` connects.
 
-    Uniware scopes facility-bound operations by a `Facility` HTTP header.
-    Without it, GetBulkItemTypeInventory rejects even a facility code that
-    exists and is enabled, with INVALID_FACILITY_CODE. The header is sent
-    whenever a facility is known; it is ignored by operations that do not
-    need it, so this is safe to send generally.
+    A `Facility` HTTP header is sent when a facility is known. It is NOT
+    how this tenant establishes facility context -- the service still
+    answers "Illegal Access, facility is required" with it set -- but it is
+    harmless, and `diagnose-facility` uses the same plumbing to probe
+    alternatives.
+
+    strict=False is REQUIRED, not a convenience. The tenant's responses do
+    not match its own WSDL: SaleOrder declares NotificationMobile before
+    NotificationEmail in an xsd:sequence, but the server omits
+    NotificationMobile entirely for orders without a mobile number. Strict
+    parsing rejects the whole response:
+
+      XMLParseError: Unexpected element '...}NotificationEmail',
+      expected '...}NotificationMobile'
+
+    That is a decode failure on a SUCCESSFUL call -- the data is there.
+    Lenient parsing reads every element the schema does declare and leaves
+    absent ones as None; nothing is silently dropped from the fields this
+    script reads.
+
+    xml_huge_tree lifts lxml's default node limits, which a 90-day order
+    window or a full-catalogue pull can exceed.
     """
     session = Session()
     if facility:
         session.headers["Facility"] = facility
     token = UsernameToken(USERNAME, API_KEY, use_digest=False)
-    return Client(WSDL_URLS[ENV], wsse=token, transport=Transport(session=session))
+    return Client(WSDL_URLS[ENV], wsse=token,
+                  transport=Transport(session=session),
+                  settings=Settings(strict=False, xml_huge_tree=True))
 
 
 def set_facility_header(client, facility):
